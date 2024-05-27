@@ -1,25 +1,26 @@
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
 use ahash::AHashMap;
+use chrono::{DateTime, NaiveDateTime};
 use eframe::egui::{self};
-use egui::{
-    plot::{Bar, BarChart, Legend, Plot, PlotPoint},
-    Color32,
-    Response,
-    RichText,
-    ScrollArea,
-    Ui,
-};
+use egui::{Color32, Response, RichText, ScrollArea, Ui};
+use egui_plot::{Bar, BarChart, Legend, Line, Plot, PlotPoint, PlotPoints};
 use hdrhistogram::Histogram;
 use postcard::to_allocvec;
 use time::OffsetDateTime;
 use uwheel::{
     aggregator::sum::U64SumAggregator,
-    wheels::read::{aggregation::conf::RetentionPolicy, hierarchical::HawConf, Haw},
+    wheels::read::{
+        aggregation::conf::{RetentionPolicy, WheelConf},
+        hierarchical::HawConf,
+        Haw,
+    },
     Conf,
     Entry,
     NumericalDuration,
+    ReaderWheel,
     RwWheel,
+    WheelRange,
 };
 
 thread_local! {
@@ -220,6 +221,8 @@ pub struct TemplateApp {
     wheels: AHashMap<Student, Rc<RefCell<RwWheel<DemoAggregator>>>>,
     #[serde(skip)]
     star_wheel: Rc<RefCell<RwWheel<DemoAggregator>>>,
+    #[serde(skip)]
+    llm_input: Rc<RefCell<Option<LLMInput>>>,
     timestamp: String,
     aggregate: String,
     ticks: u64,
@@ -271,6 +274,7 @@ impl Default for TemplateApp {
         Self {
             wheels,
             star_wheel: Rc::new(RefCell::new(wheel)),
+            llm_input: Default::default(),
             labels,
             tick_granularity: Default::default(),
             plot_key: Default::default(),
@@ -289,6 +293,95 @@ impl TemplateApp {
     /// Called once before the first frame.
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         Default::default()
+    }
+    fn llm_plot(&self, llm: Rc<RefCell<Option<LLMInput>>>, ui: &mut Ui) {
+        let empty_plot = |ui: &mut Ui| {
+            Plot::new("NYC Plot")
+                .legend(Legend::default())
+                .data_aspect(1.0)
+                .x_axis_formatter(|time, _, _| to_offset_datetime(time.value as u64).to_string())
+                .include_y(0.0)
+                .show(ui, |_plot_ui| {})
+                .response
+        };
+        if let Some(input) = llm.borrow().as_ref() {
+            let label_fmt = move |_s: &str, val: &PlotPoint| {
+                let x = val.x;
+                to_offset_datetime(x as u64).to_string()
+            };
+            egui::Window::new("NYC Citi Bike 2018-08-01 to 2018-12-31").show(ui.ctx(), |plot_ui| {
+                let lines = input.days_line();
+                Plot::new("llm")
+                    .legend(Legend::default())
+                    // .data_aspect(1.0)
+                    .view_aspect(2.0)
+                    .auto_bounds_y()
+                    .auto_bounds_x()
+                    .label_formatter(label_fmt)
+                    .x_axis_formatter(|time, _, _| {
+                        to_offset_datetime(time.value as u64).day().to_string()
+                    })
+                    .show(plot_ui, |plot_ui| {
+                        plot_ui.line(lines);
+                    });
+            });
+
+            egui::Window::new("NYC Citi Bike LLM").show(ui.ctx(), |plot_ui| {
+                plot_ui.vertical_centered(|plot_ui| {
+                    plot_ui.label("Based on the dataset you inputted, bike rides dropped most drastically in the month of December. 
+                        This may have to do with the cold weather but also the fact that it is a period when people are spending time with family and eating lots of food rather than biking."
+                        );
+
+                    plot_ui.add_space(12.0);
+
+                    plot_ui.label("Down below is a plot show the bike ride usage over the month of December.");
+
+                    plot_ui.add_space(12.0);
+
+                    let lines = input.december();
+                    Plot::new("llm")
+                        .legend(Legend::default())
+                        // .data_aspect(1.0)
+                        .view_aspect(2.0)
+                        .auto_bounds_y()
+                        .auto_bounds_x()
+                        .label_formatter(label_fmt)
+                        .x_axis_formatter(|time, _, _| {
+                            to_offset_datetime(time.value as u64).day().to_string()
+                        })
+                        .show(plot_ui, |plot_ui| {
+                            plot_ui.line(lines);
+                        });
+                });
+            });
+
+            // })
+
+            // let lines = input.days_line();
+            // Plot::new("llm")
+            //     .legend(Legend::default())
+            //     .data_aspect(1.0)
+            //     .auto_bounds_y()
+            //     .auto_bounds_x()
+            //     // .label_formatter(|name, value| format!("{name}: {}", format_bytes(value.y)))
+            //     .x_axis_formatter(|time, _, _| to_offset_datetime(time.value as u64).to_string())
+            //     .show_x(false)
+            //     .include_y(0.0)
+            //     // .y_axis_formatter(|bytes, _, _| format_bytes(bytes.value))
+            //     // .x_axis_formatter()
+            //     // .label_formatter(label_fmt)
+            //     .show(ui, |plot_ui| {
+            //         plot_ui.line(lines);
+            //         // egui::Window::new("Plot").show(plot_ui.ctx(), |ui| {
+            //         //     Plot::new("my_plot")
+            //         //         .view_aspect(2.0)
+            //         //         .show(ui, |plot_ui| plot_ui.line(lines));
+            //         // })
+            //     })
+            //     .response
+        } else {
+            // empty_plot(ui)
+        }
     }
     // TODO: optimise
     fn wheels_plot(&self, wheel: Rc<RefCell<RwWheel<DemoAggregator>>>, ui: &mut Ui) -> Response {
@@ -627,8 +720,8 @@ impl eframe::App for TemplateApp {
         puffin::GlobalProfiler::lock().new_frame(); // call once per frame!
         #[cfg(not(target_arch = "wasm32"))]
         puffin::profile_function!();
-        #[cfg(not(target_arch = "wasm32"))]
-        puffin_egui::profiler_window(ctx);
+        // #[cfg(not(target_arch = "wasm32"))]
+        // puffin_egui::profiler_window(ctx);
 
         let Self {
             labels,
@@ -638,12 +731,15 @@ impl eframe::App for TemplateApp {
             log,
             wheels,
             star_wheel,
+            llm_input,
             timestamp,
             aggregate,
             ticks,
             encoded_bytes_len,
             compressed_bytes_len,
         } = self;
+
+        let llm_input = llm_input.clone();
 
         let update_haw_labels =
             |labels: &mut HawLabels, wheel: &Rc<RefCell<RwWheel<DemoAggregator>>>| {
@@ -709,7 +805,7 @@ impl eframe::App for TemplateApp {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Quit").clicked() {
-                        _frame.close();
+                        // _frame.close();
                     }
                 });
             });
@@ -822,7 +918,7 @@ impl eframe::App for TemplateApp {
             );
 
             if ui.button("Advance").clicked() {
-                egui::trace!(ui, format!("Ticking with ticks {}", ticks));
+                // egui::trace!(ui, format!("Ticking with ticks {}", ticks));
                 if *ticks > 0 {
                     let time = match tick_granularity {
                         Granularity::Second => uwheel::Duration::seconds(*ticks as i64),
@@ -1115,6 +1211,22 @@ impl eframe::App for TemplateApp {
 
             ui.separator();
 
+            ui.heading("LLM");
+            ui.horizontal(|ui| {
+                if ui.button("Load Dataset").clicked() {
+                    // TODO: load NYC citi Bike into HAW
+                    let wheel = load_nyc_wheel();
+                    dbg!(wheel.watermark());
+                    let input = wheel_to_llm_input(wheel.read());
+                    *llm_input.borrow_mut() = Some(input);
+                    // (*llm_input.borrow_mut()).as_mut() = Some(input);
+                }
+                if ui.button("Analyze").clicked() {}
+            });
+            // TODO: ChatBox here where LLM outputs text!
+
+            ui.separator();
+
             ui.heading("Log");
             let text_style = egui::TextStyle::Body;
             let row_height = ui.text_style_height(&text_style);
@@ -1137,10 +1249,10 @@ impl eframe::App for TemplateApp {
             );
             // TODO: add custom interval query option
         });
-
         egui::CentralPanel::default().show(ctx, |ui| {
             // The central panel the region left after adding TopPanel's and SidePanel's
             self.wheels_plot(plot_wheel, ui);
+            self.llm_plot(llm_input.clone(), ui);
         });
 
         if false {
@@ -1158,4 +1270,141 @@ impl eframe::App for TemplateApp {
 pub enum LogEntry {
     Red(String),
     Green(String),
+}
+
+fn load_nyc_wheel() -> RwWheel<U64SumAggregator> {
+    let path = "citibike-tripdata.csv";
+    let watermark = datetime_to_u64("2018-08-01 00:00:00.0");
+    let mut haw_conf = HawConf::default().with_watermark(watermark);
+    haw_conf.days.set_retention_policy(RetentionPolicy::Keep);
+    let mut wheel: RwWheel<U64SumAggregator> =
+        RwWheel::with_conf(Conf::default().with_haw_conf(haw_conf));
+    let mut events = Vec::new();
+    let mut rdr = csv::Reader::from_path(path).unwrap();
+    println!("Preparing NYC Citi Bike Data");
+    for result in rdr.deserialize() {
+        let record: CitiBikeTrip = result.unwrap();
+        let event = Event::from(record);
+        events.push(event);
+    }
+    let mut max_timestamp = watermark;
+    for event in events {
+        max_timestamp = std::cmp::max(max_timestamp, event.timestamp);
+        wheel.insert(Entry::new(event.data, event.timestamp));
+    }
+    wheel.advance_to(max_timestamp);
+    wheel
+}
+
+fn wheel_to_llm_input(reader: &ReaderWheel<U64SumAggregator>) -> LLMInput {
+    dbg!(u64_to_datetime_str(reader.watermark()));
+
+    let range = WheelRange::new_unchecked(1533081600000, 1546214400000);
+    let days = reader
+        .range(range)
+        .unwrap()
+        .into_iter()
+        // .map(|(ts, agg)| (u64_to_datetime_str(ts), agg as f64))
+        .map(|(ts, agg)| [ts as f64, agg as f64])
+        .collect::<Vec<_>>();
+
+    let range = WheelRange::new_unchecked(1543622400000, 1546214400000);
+    let december = reader
+        .range(range)
+        .unwrap()
+        .into_iter()
+        .map(|(ts, agg)| [ts as f64, agg as f64])
+        .collect::<Vec<_>>();
+    let description = "Sum of bike ride durations in NYC over time".to_string();
+    let time = u64_to_datetime_str(reader.watermark());
+    LLMInput {
+        description,
+        time,
+        days,
+        december,
+    }
+}
+
+#[inline]
+pub fn datetime_to_u64(datetime: &str) -> u64 {
+    let s = NaiveDateTime::parse_from_str(datetime, "%Y-%m-%d %H:%M:%S%.f").unwrap();
+    s.timestamp_millis() as u64
+}
+
+#[inline]
+pub fn u64_to_datetime_str(ts: u64) -> String {
+    DateTime::from_timestamp_millis(ts as i64)
+        .unwrap()
+        .to_string()
+    // let s = NaiveDateTime::parse_from_str(datetime, "%Y-%m-%d %H:%M:%S%.f").unwrap();
+    // s.timestamp_millis() as u64
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[allow(dead_code)]
+struct CitiBikeTrip {
+    tripduration: u32,
+    starttime: String,
+    stoptime: String,
+    start_station_id: Option<u32>,
+    start_station_name: Option<String>,
+    start_station_latitude: Option<f64>,
+    start_station_longitude: Option<f64>,
+    end_station_id: Option<u32>,
+    end_station_name: Option<String>,
+    end_station_latitude: Option<f64>,
+    end_station_longitude: Option<f64>,
+    bikeid: Option<u32>,
+    usertype: Option<String>,
+    birth_year: Option<u32>,
+    gender: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Event {
+    data: u64,
+    timestamp: u64,
+}
+
+impl Event {
+    pub fn from(trip: CitiBikeTrip) -> Self {
+        Self {
+            data: 1u64,
+            timestamp: datetime_to_u64(&trip.starttime),
+        }
+    }
+}
+
+struct LLMInput {
+    description: String,
+    time: String,
+    days: Vec<[f64; 2]>,
+    december: Vec<[f64; 2]>,
+}
+
+// use egui_plot::PlotPoints;
+impl LLMInput {
+    fn to_plotpoints(&self) -> PlotPoints {
+        PlotPoints::new(self.days.clone())
+    }
+    fn days_line(&self) -> egui_plot::Line {
+        egui_plot::Line::new(self.to_plotpoints())
+            .name("Bike rides")
+            .width(1.5)
+    }
+    fn bad_daysz(&self) -> Vec<[f64; 2]> {
+        let points: Vec<_> = self
+            .days
+            .clone()
+            .into_iter()
+            .filter(|arr| arr[1] < 30000.0)
+            .collect();
+        points
+    }
+
+    fn december(&self) -> egui_plot::Line {
+        egui_plot::Line::new(PlotPoints::new(self.december.clone()))
+            .name("Bike rides")
+            .width(1.5)
+    }
 }

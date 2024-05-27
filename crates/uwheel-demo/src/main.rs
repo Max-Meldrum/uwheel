@@ -8,14 +8,22 @@ mod app;
 fn main() -> eframe::Result<()> {
     // tell puffin to collect data
 
-    use eframe::IconData;
     puffin::set_scopes_on(true);
     // Log to stdout (if you run with `RUST_LOG=debug`).
     tracing_subscriber::fmt::init();
 
-    let mut native_options = eframe::NativeOptions::default();
-    let icon_bytes = include_bytes!("../../../assets/logo.png");
-    native_options.icon_data = Some(IconData::try_from_png_bytes(icon_bytes).unwrap());
+    let native_options = eframe::NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default()
+            // .with_inner_size([400.0, 300.0])
+            // .with_min_inner_size([300.0, 220.0])
+            .with_icon(
+                // NOTE: Adding an icon is optional
+                eframe::icon_data::from_png_bytes(&include_bytes!("../../../assets/logo.png")[..])
+                    .expect("Failed to load icon"),
+            ),
+        ..Default::default()
+    };
+
     eframe::run_native(
         "µWheel",
         native_options,
