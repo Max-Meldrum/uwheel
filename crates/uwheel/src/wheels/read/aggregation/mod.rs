@@ -250,7 +250,7 @@ impl<A: Aggregator> Wheel<A> {
     /// # Panics
     ///
     /// The function panics if the [Aggregator] does not implement ``combine_inverse`` since
-    /// it is not an invertible aggregator that supports prefix-sum range queries.    
+    /// it is not an invertible aggregator that supports prefix-sum range queries.
     pub fn to_prefix(&mut self) {
         assert!(A::invertible());
         if let Data::Deque(deque) = &self.data {
@@ -272,9 +272,7 @@ impl<A: Aggregator> Wheel<A> {
     ///
     /// Assumes that the data layout is `Deque` and A::combine_simd is implemented.
     pub fn to_simd(&mut self) {
-        if A::simd_support() {
-            self.data.maybe_make_contigious();
-        }
+        self.data.maybe_make_contigious();
     }
 
     /// Returns number of slots used
@@ -573,22 +571,26 @@ mod tests {
             compressed_wheel.tick();
         }
 
-        let compressed_result = compressed_wheel.combine_range(0..4);
-        let result = wheel.combine_range(0..4);
-        assert_eq!(compressed_result, result);
-
         assert_eq!(
             compressed_wheel.combine_range(0..4),
             wheel.combine_range(0..4)
         );
+
+        assert_eq!(compressed_wheel.range(0..4), wheel.range(0..4));
+
         assert_eq!(
             compressed_wheel.combine_range(55..75),
             wheel.combine_range(55..75)
         );
+
+        assert_eq!(compressed_wheel.range(55..75), wheel.range(55..75));
+
         assert_eq!(
             wheel.combine_range(60..120),
             compressed_wheel.combine_range(60..120)
         );
+
+        assert_eq!(wheel.range(60..120), compressed_wheel.range(60..120));
 
         // add half of the chunk_size to check whether it still works as intended
         for i in 0..30 {
@@ -603,6 +605,10 @@ mod tests {
             compressed_wheel.combine_range(55..75),
             wheel.combine_range(55..75)
         );
+
+        assert_eq!(compressed_wheel.range(55..75), wheel.range(55..75));
+
+        assert_eq!(wheel.range(60..85), compressed_wheel.range(60..85));
         assert_eq!(
             compressed_wheel.combine_range(60..85),
             wheel.combine_range(60..85)

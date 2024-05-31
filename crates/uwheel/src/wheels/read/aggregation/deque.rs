@@ -309,6 +309,7 @@ impl<A: Aggregator> CompressedDeque<A> {
 
     pub(crate) fn push_front(&mut self, agg: A::PartialAggregate) {
         self.buffer.push_front(agg);
+
         // if we have reached the chunk size then compress
         if self.buffer.len() == self.chunk_size {
             let compressor = A::compression().unwrap().compressor;
@@ -330,7 +331,8 @@ impl<A: Aggregator> CompressedDeque<A> {
     where
         R: RangeBounds<usize>,
     {
-        self.partial_range_deque(&range).range(range)
+        let (deque, new_range) = self.partial_range_deque(&range);
+        deque.range(new_range)
     }
 
     #[inline]
@@ -338,12 +340,13 @@ impl<A: Aggregator> CompressedDeque<A> {
     where
         R: RangeBounds<usize>,
     {
-        self.partial_range_deque(&range).combine_range(range)
+        let (deque, new_range) = self.partial_range_deque(&range);
+        deque.combine_range(new_range)
     }
 
     // helper method to build a temporary deque using the given range
     #[inline]
-    fn partial_range_deque<R>(&self, range: &R) -> MutablePartialDeque<A>
+    fn partial_range_deque<R>(&self, range: &R) -> (MutablePartialDeque<A>, Range<usize>)
     where
         R: RangeBounds<usize>,
     {
@@ -360,21 +363,65 @@ impl<A: Aggregator> CompressedDeque<A> {
             Bound::Unbounded => len,
         };
 
-        let query_len = end - start;
         let mut vec = Vec::new();
-        vec.extend_from_slice(self.buffer.as_slice());
 
-        // get len of range without the buffer
-        let without_buffer_len = query_len.saturating_sub(self.buffer.len());
+        let buffer_included = start <= self.chunk_size && self.buffer.len() > 0;
+
+        // check whether we need to include the buffer which is not compressed
+        if buffer_included {
+            vec.extend_from_slice(self.buffer.as_slice());
+        }
+
+        // number of slots to query
+        let slots = end - start;
+
+        // calculate starting chunk index
+        let start_index = if buffer_included {
+            // if our buffer is included in the query range, then subtract 1 from the start index
+            (start / self.chunk_size).saturating_sub(1)
+        } else {
+            start / self.chunk_size
+        };
+
+        // calculate ending chunk index
+        let end_index = if end % self.chunk_size == 0 {
+            end / self.chunk_size
+        } else {
+            end / self.chunk_size + 1 // not fully aligned so we bump by 1 chunk
+        };
+
         // calculate number of chunks we need to decompress
-        let chunks = (without_buffer_len % self.chunk_size) + 1;
+        let chunks = ((end_index - start_index) % self.chunk_size) + 1;
+
+        // SAFETY: we are sure that the compression fn is implemented since we assert it in the constructor
+        let decompressor = A::compression().unwrap().decompressor;
 
         // decompress chunks and extend slots
-        for chunk in self.chunks.iter().take(chunks) {
-            let decompressor = A::compression().unwrap().decompressor;
+        for chunk in self.chunks.iter().skip(start_index).take(chunks) {
             let decompressed_chunk = (decompressor)(chunk);
             vec.extend_from_slice(&decompressed_chunk);
         }
-        MutablePartialDeque::from_vec(vec)
+
+        // NOTE: Recalulate range for the new deque
+
+        // 1. identify starting point
+        let chunk_start_pos = start_index * self.chunk_size;
+
+        let new_start = if start == chunk_start_pos && self.buffer.is_empty() {
+            // if the start is at the beginning of the chunk and the buffer is empty,
+            // then set our start to zero.
+            0
+        } else if start == chunk_start_pos {
+            // if start is equal to chunk start position then simply use start
+            start
+        } else {
+            // else subtract chunk start position from start to get the new start position
+            start.saturating_sub(chunk_start_pos)
+        };
+
+        // 2. identify ending point by adding the number of slots
+        let new_end: usize = new_start + (slots + 1); // adding 1 here to include the end bound
+
+        (MutablePartialDeque::from_vec(vec), new_start..new_end)
     }
 }
